@@ -10,7 +10,10 @@ import pytest
 from typer.testing import CliRunner
 
 import scout.cli.app as cli
+from scout.cli.approval import RichApprover
 from scout.providers import ModelProvider, ProviderReply, ToolCall, Turn
+from scout.security.policy import ApprovalDecision, ApprovalRequest
+from scout.tools import PermissionLevel
 
 runner = CliRunner()
 
@@ -68,6 +71,29 @@ def test_ask_renders_answer(patched, monkeypatch) -> None:
     result = runner.invoke(cli.app, ["ask", "hi"])
     assert result.exit_code == 0
     assert "Hello from Scout" in result.output
+
+
+def test_non_interactive_approver_denies() -> None:
+    approver = RichApprover(cli.console, interactive=False)
+    request = ApprovalRequest(
+        tool="type_text",
+        permission=PermissionLevel.EXECUTE,
+        arguments={"text": "hello"},
+        description="type text",
+    )
+    assert approver.approve(request) is ApprovalDecision.DENY
+
+
+def test_desktop_action_is_denied_without_a_terminal(patched, monkeypatch) -> None:
+    replies = [
+        ProviderReply(text=None, tool_calls=[ToolCall(name="lock_screen", arguments={})]),
+        ProviderReply(text="I could not lock the screen."),
+    ]
+    monkeypatch.setattr(cli, "create_provider", lambda _s: FakeProvider(replies))
+    result = runner.invoke(cli.app, ["ask", "lock my screen"])
+    assert result.exit_code == 0
+    assert "no interactive terminal" in result.output
+    assert "denied" in result.output.lower()
 
 
 def test_ask_runs_tools(patched, monkeypatch) -> None:

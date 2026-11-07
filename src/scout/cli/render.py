@@ -81,6 +81,7 @@ def summarise_result(tool: str, result: ToolResult, limit: int = 120) -> str:
             ("entries", "entr(ies)"),
             ("processes", "process(es)"),
             ("applications", "application(s)"),
+            ("windows", "window(s)"),
         ):
             if isinstance(data.get(key), list):
                 suffix = " (truncated)" if data.get("truncated") else ""
@@ -105,14 +106,28 @@ def render_tool_result(call: ToolCall, result: ToolResult) -> None:
         console.print(f"  [red]✗[/red] [red]{summary}[/red] [dim]· {result.duration_ms} ms[/dim]")
 
 
-def render_answer(text: str) -> None:
+def render_answer(
+    text: str,
+    *,
+    duration_ms: int | None = None,
+    model_ms: int | None = None,
+    tools: int = 0,
+) -> None:
     body = text.strip() or "(empty response)"
     try:
         content: Any = Markdown(body, hyperlinks=False)
     except Exception:  # pragma: no cover - malformed markdown should never crash a run
         content = body
+    subtitle = None
+    if duration_ms is not None:
+        parts = [f"{duration_ms / 1000:.1f}s"]
+        if model_ms is not None:
+            parts.append(f"model {model_ms / 1000:.1f}s")
+        if tools:
+            parts.append(f"{tools} tool(s)")
+        subtitle = " · ".join(parts)
     console.print()
-    console.print(Panel(content, title="scout", border_style="green"))
+    console.print(Panel(content, title="scout", subtitle=subtitle, border_style="green"))
 
 
 def render_error(message: str) -> None:

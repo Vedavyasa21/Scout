@@ -10,6 +10,7 @@ from rich.table import Table
 
 from scout import __version__
 from scout.agent import Agent, AgentHooks
+from scout.cli.approval import RichApprover
 from scout.cli.doctor import run_doctor
 from scout.cli.render import (
     console,
@@ -25,6 +26,7 @@ from scout.config import ConfigurationError, Settings, load_settings
 from scout.logging import configure_logging
 from scout.providers import ModelProvider, ProviderError, Turn, UserTurn, create_provider
 from scout.tools import build_registry
+from scout.voice import VoiceError, record_wav, transcribe_wav
 
 app = typer.Typer(
     name="scout",
@@ -60,7 +62,13 @@ def _build_agent(settings: Settings, hooks: AgentHooks) -> tuple[Agent, ModelPro
     except ProviderError as exc:
         _fail(str(exc))
     registry = build_registry()
-    agent = Agent(provider=provider, registry=registry, settings=settings, hooks=hooks)
+    agent = Agent(
+        provider=provider,
+        registry=registry,
+        settings=settings,
+        hooks=hooks,
+        approver=RichApprover(console),
+    )
     return agent, provider
 
 
@@ -110,7 +118,12 @@ def ask(
         console.print("\n[dim]interrupted[/dim]")
         raise typer.Exit(130) from None
 
-    render_answer(result.text)
+    render_answer(
+        result.text,
+        duration_ms=result.duration_ms,
+        model_ms=result.model_ms,
+        tools=result.succeeded_tools,
+    )
     if not result.completed:
         raise typer.Exit(1)
 
@@ -156,6 +169,9 @@ def show_config() -> None:
         "model": settings.model,
         "api key": "configured" if settings.api_key.strip() else "[red]missing[/red]",
         "max tool steps": str(settings.max_tool_steps),
+        "thinking budget": "default"
+        if settings.thinking_budget < 0
+        else str(settings.thinking_budget),
         "tool timeout (s)": str(settings.tool_timeout),
         "request timeout (s)": str(settings.request_timeout),
         "log level": settings.log_level,
@@ -177,6 +193,85 @@ def doctor(
     """Diagnose installation, configuration and connectivity."""
     settings = _load()
     raise typer.Exit(run_doctor(settings, check_api=check_api))
+
+
+@app.command()
+def voice() -> None:
+    """Talk to Scout: record a spoken request, transcribe it, then run it."""
+    settings = _load()
+    hooks = AgentHooks(
+        on_model_call=render_model_call,
+        on_tool_start=render_tool_start,
+        on_tool_result=render_tool_result,
+    )
+    agent, provider = _build_agent(settings, hooks)
+
+    console.print(
+        "[bold cyan]Voice mode[/bold cyan] [dim]· speak after the prompt · say 'exit' to stop[/dim]"
+    )
+    history: list[Turn] = []
+    while True:
+        console.print("[dim]listening…[/dim]")
+        try:
+            recording = record_wav(
+                max_seconds=settings.voice_max_seconds,
+                silence_seconds=settings.voice_silence_seconds,
+            )
+        except VoiceError as exc:
+            _fail(str(exc))
+        except KeyboardInterrupt:
+            console.print("\n[dim]stopped[/dim]")
+            break
+        if recording is None:
+            console.print("[yellow]heard nothing[/yellow] [dim](try again)[/dim]")
+            continue
+
+        try:
+            text = transcribe_wav(provider, recording)
+        except ProviderError as exc:
+            render_error(str(exc))
+            continue
+        console.print(f"[bold cyan]you[/bold cyan] [dim]›[/dim] {text}")
+        if text.strip().lower().rstrip(".!?") in {"exit", "quit", "stop listening", "goodbye"}:
+            break
+
+        try:
+            result = agent.run(text, history=history)
+        except ProviderError as exc:
+            render_error(str(exc))
+            continue
+        except KeyboardInterrupt:
+            console.print("\n[dim]interrupted[/dim]")
+            continue
+        history = _trim_history(list(result.turns))
+        render_answer(
+            result.text,
+            duration_ms=result.duration_ms,
+            model_ms=result.model_ms,
+            tools=result.succeeded_tools,
+        )
+
+
+@app.command()
+def overlay(
+    opacity: float | None = typer.Option(
+        None, "--opacity", min=0.3, max=1.0, help="Icon opacity (default from config)."
+    ),
+) -> None:
+    """Show the floating Scout icon (click to talk, right-click for menu)."""
+    settings = _load()
+    from scout.desktop.overlay import run_overlay
+
+    try:
+        run_overlay(settings, opacity=opacity)
+    except KeyboardInterrupt:
+        console.print("[dim]overlay closed[/dim]")
+    except ProviderError as exc:
+        _fail(str(exc))
+    except ConfigurationError as exc:
+        _fail(str(exc))
+    except Exception as exc:
+        _fail(f"Could not open the overlay: {exc}")
 
 
 @app.command()
@@ -234,7 +329,12 @@ def interactive() -> None:
             continue
 
         history = _trim_history(list(result.turns))
-        render_answer(result.text)
+        render_answer(
+            result.text,
+            duration_ms=result.duration_ms,
+            model_ms=result.model_ms,
+            tools=result.succeeded_tools,
+        )
 
 
 def _configure_stdio() -> None:

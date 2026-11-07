@@ -181,9 +181,13 @@ class GeminiProvider(ModelProvider):
         api_key: str,
         request_timeout: float = 120.0,
         max_retries: int = 2,
+        thinking_budget: int = -1,
+        thinking_level: str = "",
     ) -> None:
         super().__init__(model=model, api_key=api_key, request_timeout=request_timeout)
         self.max_retries = max_retries
+        self.thinking_budget = thinking_budget
+        self.thinking_level = thinking_level
         try:
             from google import genai
             from google.genai import types
@@ -207,25 +211,80 @@ class GeminiProvider(ModelProvider):
         tools: Sequence[dict[str, Any]],
     ) -> ProviderReply:
         types = self._types
-        config = types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=_TEMPERATURE,
-            tools=_tool_declarations(tools),
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        config_args: dict[str, Any] = {
+            "system_instruction": system,
+            "temperature": _TEMPERATURE,
+            "tools": _tool_declarations(tools),
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+        }
+        if self.thinking_budget >= 0:
+            config_args["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=self.thinking_budget
+            )
+        elif self.thinking_level:
+            config_args["thinking_config"] = types.ThinkingConfig(
+                thinking_level=self.thinking_level
+            )
+        config = types.GenerateContentConfig(**config_args)
         logger.debug(
             "gemini request model=%s turns=%d tools=%d", self.model, len(turns), len(tools)
         )
         contents = _to_gemini_contents(turns)
+        try:
+            response = self._generate(contents, config)
+        except ProviderError as exc:
+            # Not every model accepts thinking settings. Retry once without them
+            # rather than failing the whole request after a model swap.
+            if "thinking_config" not in config_args or "invalid argument" not in str(exc).lower():
+                raise
+            logger.warning("model rejected thinking settings; retrying without them")
+            config_args.pop("thinking_config")
+            response = self._generate(contents, types.GenerateContentConfig(**config_args))
+        reply = _extract_reply(response)
+        logger.debug(
+            "gemini reply finish=%s tool_calls=%d text_chars=%d",
+            reply.finish_reason,
+            len(reply.tool_calls),
+            len(reply.text or ""),
+        )
+        return reply
+
+    def transcribe_audio(self, data: bytes, *, mime_type: str = "audio/wav") -> str:
+        """Transcribe a recorded voice command with Gemini's audio input."""
+        types = self._types
+        config = types.GenerateContentConfig(
+            system_instruction=(
+                "You transcribe spoken computer commands. Output only the transcript, "
+                "without commentary, quotes or speaker labels."
+            ),
+            temperature=0.0,
+            max_output_tokens=1024,
+        )
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_bytes(data=data, mime_type=mime_type),
+                    types.Part(text="Transcribe the speech in this audio exactly."),
+                ],
+            )
+        ]
+        response = self._generate(contents, config)
+        text = (response.text or "").strip()
+        if not text:
+            raise ProviderError("No speech was detected in the recording.")
+        return text
+
+    def _generate(self, contents: Any, config: Any) -> Any:
+        """Make one request with bounded exponential backoff for transient errors."""
         attempts = self.max_retries + 1
         for attempt in range(1, attempts + 1):
             try:
-                response = self._client.models.generate_content(
+                return self._client.models.generate_content(
                     model=self.model,
                     contents=contents,
                     config=config,
                 )
-                break
             except Exception as exc:  # SDK raises several unrelated error types
                 if attempt < attempts and _is_retryable(exc):
                     delay = min(2 ** (attempt - 1), 4)
@@ -240,12 +299,4 @@ class GeminiProvider(ModelProvider):
                 message = _friendly_error(exc, self._api_key)
                 logger.warning("gemini request failed: %s", message)
                 raise ProviderError(message) from exc
-
-        reply = _extract_reply(response)
-        logger.debug(
-            "gemini reply finish=%s tool_calls=%d text_chars=%d",
-            reply.finish_reason,
-            len(reply.tool_calls),
-            len(reply.text or ""),
-        )
-        return reply
+        raise ProviderError("The provider request failed without a response.")  # pragma: no cover

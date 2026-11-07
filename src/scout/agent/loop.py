@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Sequence
 
@@ -18,7 +19,7 @@ from scout.providers import (
     Turn,
     UserTurn,
 )
-from scout.tools import ToolContext, ToolRegistry, ToolResult
+from scout.tools import Approver, ToolContext, ToolRegistry, ToolResult
 
 logger = get_logger("agent")
 
@@ -42,13 +43,14 @@ class Agent:
         settings: Settings,
         hooks: AgentHooks | None = None,
         system_prompt: str | None = None,
+        approver: Approver | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
         self.settings = settings
-        self.context = ToolContext.from_settings(settings)
+        self.context = ToolContext.from_settings(settings, approver)
         self.hooks = hooks or AgentHooks()
-        self.system_prompt = system_prompt or build_system_prompt(settings)
+        self.system_prompt = system_prompt or build_system_prompt(settings, registry.all())
         self.max_steps = settings.max_tool_steps
         self._max_calls = self.max_steps * MAX_CALLS_PER_ROUND
 
@@ -59,6 +61,8 @@ class Agent:
         turns.append(UserTurn(text=message))
         steps: list[StepRecord] = []
         calls_made = 0
+        started_at = time.perf_counter()
+        model_ms = 0
 
         logger.info("task started", extra={"task_id": task_id, "event": "task_start"})
 
@@ -66,11 +70,13 @@ class Agent:
             if self.hooks.on_model_call:
                 self.hooks.on_model_call(step)
 
+            model_started = time.perf_counter()
             reply: ProviderReply = self.provider.complete(
                 system=self.system_prompt,
                 turns=turns,
                 tools=self.registry.specs(),
             )
+            model_ms += int((time.perf_counter() - model_started) * 1000)
             turns.append(AssistantTurn(text=reply.text, tool_calls=reply.tool_calls, raw=reply.raw))
 
             if not reply.tool_calls:
@@ -92,6 +98,8 @@ class Agent:
                     steps=steps,
                     turns=turns,
                     task_id=task_id,
+                    duration_ms=int((time.perf_counter() - started_at) * 1000),
+                    model_ms=model_ms,
                 )
 
             for call in reply.tool_calls[:MAX_CALLS_PER_ROUND]:
@@ -160,6 +168,8 @@ class Agent:
             steps=steps,
             turns=turns,
             task_id=task_id,
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+            model_ms=model_ms,
         )
 
     def _execute(self, task_id: str, step: int, call: ToolCall) -> ToolResult:

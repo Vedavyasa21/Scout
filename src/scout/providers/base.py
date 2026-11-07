@@ -79,6 +79,10 @@ class ModelProvider(ABC):
     ) -> ProviderReply:
         """Send the conversation and available tools, returning the next reply."""
 
+    def transcribe_audio(self, data: bytes, *, mime_type: str = "audio/wav") -> str:
+        """Transcribe spoken audio to text. Optional capability."""
+        raise ProviderError(f"Provider '{self.name}' does not support audio transcription.")
+
     def verify(self) -> str:
         """Perform a minimal round trip to verify credentials. Returns model text."""
         reply = self.complete(

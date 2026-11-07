@@ -31,6 +31,9 @@ dependencies = [
     "google-genai>=0.3",
     "psutil>=5.9",
     "platformdirs>=4.2",
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+    "sounddevice>=0.4.6",
 ]
 
 [project.optional-dependencies]

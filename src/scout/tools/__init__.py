@@ -1,8 +1,15 @@
-"""Tool package: expose the registry contract."""
+"""Tool package: expose the registry contract and approval types."""
 
+from scout.security.policy import (
+    AllowAllApprover,
+    ApprovalDecision,
+    ApprovalRequest,
+    Approver,
+    DenyAllApprover,
+    PolicyEngine,
+)
 from scout.tools.base import (
     PermissionDeniedError,
-    PermissionGate,
     PermissionLevel,
     Tool,
     ToolArgumentError,
@@ -16,9 +23,14 @@ from scout.tools.base import (
 )
 
 __all__ = [
+    "AllowAllApprover",
+    "ApprovalDecision",
+    "ApprovalRequest",
+    "Approver",
+    "DenyAllApprover",
     "PermissionDeniedError",
-    "PermissionGate",
     "PermissionLevel",
+    "PolicyEngine",
     "Tool",
     "ToolArgumentError",
     "ToolContext",

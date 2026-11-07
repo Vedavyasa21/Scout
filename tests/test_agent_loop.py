@@ -17,6 +17,7 @@ from scout.providers import (
     UserTurn,
 )
 from scout.tools import (
+    AllowAllApprover,
     PermissionLevel,
     Tool,
     ToolContext,
@@ -117,7 +118,7 @@ def test_unknown_tool_failure_is_reported_not_claimed(settings) -> None:
     assert result.failed_tools == 1
 
 
-def test_write_tool_is_denied_by_gate(settings) -> None:
+def test_write_tool_without_approver_is_denied(settings) -> None:
     replies = [
         ProviderReply(text=None, tool_calls=[ToolCall(name="fake_write", arguments={})]),
         ProviderReply(text="I cannot write files yet."),
@@ -125,7 +126,23 @@ def test_write_tool_is_denied_by_gate(settings) -> None:
     agent = _agent(settings, replies)
     result = agent.run("write a file")
     assert result.steps[0].ok is False
-    assert "permission" in (result.steps[0].error or "").lower()
+    assert "confirmation" in (result.steps[0].error or "").lower()
+
+
+def test_write_tool_runs_when_approved(settings) -> None:
+    replies = [
+        ProviderReply(text=None, tool_calls=[ToolCall(name="fake_write", arguments={})]),
+        ProviderReply(text="Written."),
+    ]
+    agent = Agent(
+        provider=FakeProvider(replies),
+        registry=_registry(),
+        settings=settings,
+        approver=AllowAllApprover(),
+    )
+    result = agent.run("write a file")
+    assert result.steps[0].ok is True
+    assert result.text == "Written."
 
 
 def test_step_limit_is_enforced(settings) -> None:

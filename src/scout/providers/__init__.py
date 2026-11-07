@@ -38,6 +38,8 @@ def create_provider(settings: Settings) -> ModelProvider:
             api_key=api_key,
             request_timeout=settings.request_timeout,
             max_retries=settings.max_retries,
+            thinking_budget=settings.thinking_budget,
+            thinking_level=settings.thinking_level,
         )
     raise ConfigurationError(f"Unsupported provider '{provider}'")  # pragma: no cover
 

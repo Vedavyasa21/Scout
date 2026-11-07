@@ -11,12 +11,15 @@ No model output reaches the OS without passing local validation and the policy g
 ├──────────────────────────────┬──────────────────────────────┤
 │ providers/                   │ tools/                       │
 │  base.py  Turn/ToolCall      │  base.py  registry, schema,  │
-│  gemini.py  SDK translation  │           gate, execution    │
+│  gemini.py  SDK translation  │           policy, execution  │
 │                              │  system.py                   │
 │                              │  filesystem.py               │
 │                              │  applications.py             │
+│                              │  desktop.py  windows/input    │
 ├──────────────────────────────┴──────────────────────────────┤
-│ security/       workspace resolution · redaction            │
+│ security/       workspace resolution · policy · redaction   │
+│ voice/          recording · Gemini transcription            │
+│ desktop/        floating icon and approval dialogs          │
 │ config/         Pydantic settings · .env                    │
 │ logging/        JSON file logs · secret filtering           │
 └─────────────────────────────────────────────────────────────┘
@@ -27,8 +30,9 @@ No model output reaches the OS without passing local validation and the policy g
 1. The CLI loads validated `Settings` and builds the registry.
 2. `Agent.run(message, history)` appends a `UserTurn` and enters the loop.
 3. The provider receives the system prompt, the turn history and JSON tool specs.
-4. If the reply has tool calls, the registry validates arguments, checks the
-   permission gate, executes with a timeout, and returns a `ToolResult`.
+4. If the reply has tool calls, the registry validates arguments, consults the
+   approval policy (prompting the user when required), executes with a timeout,
+   and returns a `ToolResult`.
 5. The result is appended as a `ToolTurn`; the model sees it on the next call.
 6. When the model replies without tool calls, that text is the final answer.
 
@@ -72,11 +76,19 @@ handler, optional timeout and tags. The registry:
 Validation is intentionally strict: unknown arguments are rejected, numeric
 bounds and enums are enforced, and `true` is not accepted for an integer field.
 
-### Permission gate (Milestone 1)
+### Approval policy
 
-`PermissionGate` auto-approves `READ` and `LOW_RISK`; every other level is refused
-with an explanatory error. Milestone 2 replaces it with an approval workflow while
-keeping the same call site, so tools do not change.
+`PolicyEngine` auto-approves `READ` and `LOW_RISK`. `WRITE`, `EXECUTE` and
+`HIGH_RISK` require an `Approver`:
+
+- the CLI renders a Rich panel with the tool, permission and exact arguments;
+- the overlay uses a Tk dialog (typed `allow` for high-risk actions);
+- without an interactive approver the call is denied, so piped/CI runs cannot
+  approve themselves;
+- `ALLOW_SESSION` remembers that tool for the rest of the session.
+
+The registry re-times execution after approval, so prompt deliberation is not
+reported as tool latency. Exceptions inside an approver are treated as denial.
 
 ## Filesystem safety
 
@@ -98,6 +110,34 @@ allowlisted path, `PATH` lookup, then a small Windows fallback table. Launch use
 `os.startfile` on Windows and an argument-array `Popen` without a shell elsewhere.
 Scout reports that the OS accepted the launch request; it does not claim to know
 the window state.
+
+The separate `launch_app` tool resolves any installed application from Start Menu
+shortcuts (`.lnk`/`.url`), refuses ambiguous names with a candidate list, and runs
+at `EXECUTE` level, so an arbitrary app launch always needs confirmation.
+
+## Desktop control
+
+Desktop tools live in `tools/desktop.py` and use `pyautogui`/`pygetwindow`, imported
+lazily so a missing GUI dependency only disables those tools. Guardrails:
+
+- coordinates are checked against the current screen size;
+- key names are validated against `pyautogui.KEYBOARD_KEYS` before any press;
+- typing is ASCII-only and capped at 2000 characters;
+- window lookup prefers an exact title and refuses ambiguous matches;
+- `pyautogui.FAILSAFE` stays enabled: moving the pointer to a screen corner aborts;
+- screenshot files go to Scout's data directory, not user workspaces.
+
+## Voice and overlay
+
+`voice/` records 16 kHz mono PCM with `sounddevice`, stops after a configurable
+silence window, wraps the audio in a WAV container, and sends it to Gemini for
+transcription. The transcript is treated exactly like typed input and goes through
+the same agent and approval path.
+
+`desktop/overlay.py` is a frameless Tk orb at 65% opacity: click to talk, drag to
+move, right-click for a typed prompt or to quit. It keeps a bounded conversation
+history and routes approvals through modal dialogs on the Tk thread while the
+agent runs in a worker thread.
 
 ## Logging and privacy
 

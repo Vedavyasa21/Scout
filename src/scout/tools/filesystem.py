@@ -259,15 +259,19 @@ def register(registry: ToolRegistry) -> None:
         Tool(
             name="search_files",
             description=(
-                "Search for files or folders by name inside approved workspaces. "
-                "Use this to locate projects, documents or folders."
+                "Find files or folders by NAME (path substring) inside approved "
+                "workspaces. This does NOT search file contents. To inspect code or "
+                "text, list the directory and read the relevant file instead."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Case-insensitive substring to match in file/folder names.",
+                        "description": (
+                            "Case-insensitive substring matched against file and folder "
+                            "names only, never file contents."
+                        ),
                         "minLength": 1,
                         "maxLength": 200,
                     },

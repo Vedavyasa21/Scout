@@ -47,7 +47,13 @@ class Settings(BaseSettings):
 
     provider: str = "gemini"
     api_key: str = ""
-    model: str = "gemini-3.5-flash"
+    # Flash-lite answers tool-call turns in ~1s; larger Flash models take 9-70s.
+    model: str = "gemini-3.5-flash-lite"
+    # -1 leaves the provider default. 0 disables thinking on models that allow it.
+    thinking_budget: int = Field(default=-1, ge=-1, le=32768)
+    # Cheaper than a numeric budget and supported by Gemini 3.5 flash-lite.
+    # Empty string leaves the provider default.
+    thinking_level: str = "minimal"
 
     max_tool_steps: int = Field(default=8, ge=1, le=40)
     tool_timeout: float = Field(default=60.0, gt=0, le=600)
@@ -59,6 +65,11 @@ class Settings(BaseSettings):
         default_factory=lambda: list(DEFAULT_ALLOWED_APPS)
     )
 
+    voice_model: str = ""  # empty = use `model`
+    voice_max_seconds: float = Field(default=15.0, gt=1.0, le=60.0)
+    voice_silence_seconds: float = Field(default=1.2, gt=0.3, le=5.0)
+    overlay_opacity: float = Field(default=0.65, ge=0.3, le=1.0)
+
     log_level: str = "INFO"
     log_file: Path | None = None
 
@@ -66,6 +77,15 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
+
+    @field_validator("thinking_level")
+    @classmethod
+    def _check_thinking_level(cls, value: str) -> str:
+        level = value.strip().lower()
+        allowed = {"", "minimal", "low", "medium", "high"}
+        if level not in allowed:
+            raise ValueError(f"thinking_level must be one of {sorted(allowed)}")
+        return level
 
     @field_validator("log_level")
     @classmethod
@@ -107,6 +127,10 @@ class Settings(BaseSettings):
         path = user_log_path(APP_NAME, appauthor=False) / "scout.log"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def transcription_model(self) -> str:
+        return self.voice_model.strip() or self.model
 
     def require_api_key(self) -> str:
         if not self.api_key.strip():

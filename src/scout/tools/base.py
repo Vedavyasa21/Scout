@@ -7,21 +7,31 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from scout.config import Settings
+from scout.security.permissions import PermissionLevel
+from scout.security.policy import (
+    ApprovalDecision,
+    ApprovalRequest,
+    Approver,
+    PolicyEngine,
+)
 
-
-class PermissionLevel(StrEnum):
-    """Central permission categories used by the policy engine."""
-
-    READ = "read"
-    LOW_RISK = "low_risk"
-    WRITE = "write"
-    EXECUTE = "execute"
-    HIGH_RISK = "high_risk"
+__all__ = [
+    "PermissionDeniedError",
+    "PermissionLevel",
+    "Tool",
+    "ToolArgumentError",
+    "ToolContext",
+    "ToolError",
+    "ToolNotFoundError",
+    "ToolRegistry",
+    "ToolResult",
+    "build_registry",
+    "validate_arguments",
+]
 
 
 class ToolError(Exception):
@@ -46,10 +56,15 @@ class ToolContext:
 
     settings: Settings
     workspaces: tuple[Path, ...] = field(default_factory=tuple)
+    approver: Approver | None = None
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> ToolContext:
-        return cls(settings=settings, workspaces=tuple(settings.workspaces))
+    def from_settings(cls, settings: Settings, approver: Approver | None = None) -> ToolContext:
+        return cls(
+            settings=settings,
+            workspaces=tuple(settings.workspaces),
+            approver=approver,
+        )
 
 
 @dataclass
@@ -145,24 +160,6 @@ def validate_arguments(schema: dict[str, Any], arguments: dict[str, Any]) -> dic
     return validated
 
 
-class PermissionGate:
-    """Milestone 1 policy gate.
-
-    Read-only and allowlisted low-risk tools are auto-approved. Every other
-    category is refused until the approval workflow lands in Milestone 2, so no
-    write or execute tool can run accidentally in the meantime.
-    """
-
-    ALLOWED = frozenset({PermissionLevel.READ, PermissionLevel.LOW_RISK})
-
-    def check(self, tool: Tool) -> None:
-        if tool.permission not in self.ALLOWED:
-            raise PermissionDeniedError(
-                f"Tool '{tool.name}' requires '{tool.permission.value}' permission, "
-                "which is not available in this build (Milestone 2)."
-            )
-
-
 class Tool:
     """A single registered capability."""
 
@@ -201,9 +198,9 @@ class Tool:
 class ToolRegistry:
     """Central registry of tools, keyed by unique name."""
 
-    def __init__(self, gate: PermissionGate | None = None) -> None:
+    def __init__(self, policy: PolicyEngine | None = None) -> None:
         self._tools: dict[str, Tool] = {}
-        self.gate = gate or PermissionGate()
+        self.policy = policy or PolicyEngine()
 
     def register(self, tool: Tool) -> None:
         if not tool.name or not tool.name.replace("_", "").isalnum():
@@ -251,9 +248,38 @@ class ToolRegistry:
         try:
             tool = self.get(name)
             validated = validate_arguments(tool.parameters, arguments)
-            self.gate.check(tool)
         except ToolError as exc:
             return ToolResult(ok=False, error=str(exc))
+
+        if self.policy.requires_approval(tool):
+            request = ApprovalRequest(
+                tool=tool.name,
+                permission=tool.permission,
+                arguments=validated,
+                description=tool.description,
+            )
+            if context.approver is None:
+                return ToolResult(
+                    ok=False,
+                    error=(
+                        f"Tool '{tool.name}' needs confirmation, but no approval prompt is "
+                        "available in this mode."
+                    ),
+                )
+            try:
+                decision = context.approver.approve(request)
+            except Exception as exc:  # a broken UI must never mean "allow"
+                return ToolResult(ok=False, error=f"Approval failed: {exc}")
+            if decision is ApprovalDecision.ALLOW_SESSION:
+                self.policy.remember(tool.name)
+            elif decision is not ApprovalDecision.ALLOW_ONCE:
+                # DENY, None, a bool or any unexpected value fails closed.
+                return ToolResult(
+                    ok=False,
+                    error=f"The user denied permission to run '{tool.name}'.",
+                )
+            # Do not count time spent deciding as tool execution time.
+            started = time.perf_counter()
 
         timeout = tool.timeout or context.settings.tool_timeout
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -272,11 +298,12 @@ class ToolRegistry:
 
 
 def build_registry() -> ToolRegistry:
-    """Build the default registry with the Milestone 1 tools."""
-    from scout.tools import applications, filesystem, system
+    """Build the default registry with every built-in tool."""
+    from scout.tools import applications, desktop, filesystem, system
 
     registry = ToolRegistry()
     system.register(registry)
     filesystem.register(registry)
     applications.register(registry)
+    desktop.register(registry)
     return registry

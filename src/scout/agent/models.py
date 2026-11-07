@@ -32,6 +32,8 @@ class AgentResult:
     steps: list[StepRecord] = field(default_factory=list)
     turns: list[Turn] = field(default_factory=list)
     task_id: str = ""
+    duration_ms: int = 0
+    model_ms: int = 0
 
     @property
     def succeeded_tools(self) -> int:

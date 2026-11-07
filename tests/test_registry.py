@@ -7,7 +7,8 @@ import time
 import pytest
 
 from scout.tools import (
-    PermissionDeniedError,
+    AllowAllApprover,
+    ApprovalDecision,
     PermissionLevel,
     Tool,
     ToolArgumentError,
@@ -133,12 +134,44 @@ class TestRegistry:
         "level",
         [PermissionLevel.WRITE, PermissionLevel.EXECUTE, PermissionLevel.HIGH_RISK],
     )
-    def test_privileged_tools_are_denied(self, settings, level: PermissionLevel) -> None:
+    def test_privileged_tools_need_an_approver(self, settings, level: PermissionLevel) -> None:
         registry = ToolRegistry()
         registry.register(_tool(permission=level))
         result = registry.execute("echo", {"path": "x"}, ToolContext.from_settings(settings))
         assert not result.ok
-        assert "permission" in (result.error or "").lower()
+        assert "confirmation" in (result.error or "").lower()
+
+    def test_approved_tool_runs(self, settings) -> None:
+        registry = ToolRegistry()
+        registry.register(_tool(permission=PermissionLevel.EXECUTE))
+        context = ToolContext.from_settings(settings, AllowAllApprover())
+        assert registry.execute("echo", {"path": "x"}, context).ok
+
+    def test_denied_tool_does_not_run(self, settings) -> None:
+        calls: list[str] = []
+
+        def handler(_args: dict, _ctx: ToolContext) -> ToolResult:
+            calls.append("ran")
+            return ToolResult(ok=True)
+
+        class Denier:
+            def approve(self, _request):
+                return ApprovalDecision.DENY
+
+        registry = ToolRegistry()
+        registry.register(
+            Tool(
+                name="danger",
+                description="danger",
+                parameters={"type": "object", "properties": {}},
+                permission=PermissionLevel.HIGH_RISK,
+                handler=handler,
+            )
+        )
+        result = registry.execute("danger", {}, ToolContext.from_settings(settings, Denier()))
+        assert not result.ok
+        assert "denied" in (result.error or "").lower()
+        assert calls == []
 
     def test_low_risk_tool_is_allowed(self, settings) -> None:
         registry = ToolRegistry()
@@ -186,15 +219,13 @@ class TestRegistry:
     def test_default_registry_contents(self) -> None:
         registry = build_registry()
         names = set(registry.names())
-        assert {"get_os_info", "search_files", "launch_application"} <= names
-        assert all(
-            tool.permission in {PermissionLevel.READ, PermissionLevel.LOW_RISK}
-            for tool in registry.all()
-        )
+        assert {
+            "get_os_info",
+            "search_files",
+            "launch_application",
+            "list_windows",
+            "type_text",
+            "screenshot",
+        } <= names
+        assert all(isinstance(tool.permission, PermissionLevel) for tool in registry.all())
         assert len(registry.specs()) == len(names)
-
-
-def test_permission_gate_message(settings) -> None:
-    gate = ToolRegistry().gate
-    with pytest.raises(PermissionDeniedError):
-        gate.check(_tool(permission=PermissionLevel.WRITE))
