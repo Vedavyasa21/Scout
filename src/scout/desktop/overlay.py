@@ -1,4 +1,4 @@
-"""A small always-on-top Scout orb for voice and quick typed requests.
+"""A small always-on-top Scout pill for voice and quick typed requests.
 
 The window is frameless, translucent and draggable. Left-click starts a voice
 request; right-click offers a typed prompt and quit. Tools that change the
@@ -28,18 +28,89 @@ from scout.voice import (
     transcribe_wav,
 )
 
-SIZE = 64
+WIDTH = 250
+HEIGHT = 80
+ORB_CENTER = (40, 40)
+ORB_RADIUS = 22
+RING_BOX = (
+    ORB_CENTER[0] - ORB_RADIUS,
+    ORB_CENTER[1] - ORB_RADIUS,
+    ORB_CENTER[0] + ORB_RADIUS,
+    ORB_CENTER[1] + ORB_RADIUS,
+)
 TRANSPARENT = "#010203"  # Windows transparent-color key; never drawn visibly
-ORB_FILL = "#0b1220"
-MIC = "#e2e8f0"
+PANEL_FILL = "#0f172a"
+PANEL_BORDER = "#0ea5e9"
+MIC = "#ffffff"
+TEXT = "#ffffff"
+MUTED = "#38bdf8"
 COLORS = {
-    "idle": "#22d3ee",
+    "idle": "#00f0ff",
     "listening": "#f87171",
     "thinking": "#fbbf24",
     "acting": "#a78bfa",
     "error": "#ef4444",
 }
+STATE_TEXT = {
+    "idle": "click to talk",
+    "listening": "listening…",
+    "thinking": "thinking…",
+    "acting": "working…",
+    "error": "something went wrong",
+}
 BUBBLE_BG = "#0f172a"
+
+
+def _rounded_panel(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, r: float):
+    """Draw a soft rectangle as a smoothed polygon (no image assets needed)."""
+    points = [
+        x1 + r,
+        y1,
+        x2 - r,
+        y1,
+        x2 - r,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + r,
+        x2,
+        y1 + r,
+        x2,
+        y2 - r,
+        x2,
+        y2 - r,
+        x2,
+        y2,
+        x2 - r,
+        y2,
+        x2 - r,
+        y2,
+        x1 + r,
+        y2,
+        x1 + r,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - r,
+        x1,
+        y2 - r,
+        x1,
+        y1 + r,
+        x1,
+        y1 + r,
+        x1 + r,
+        y1,
+    ]
+    return canvas.create_polygon(
+        points,
+        smooth=True,
+        splinesteps=36,
+        fill=PANEL_FILL,
+        outline=PANEL_BORDER,
+        width=2,
+    )
 
 
 class TkApprover:
@@ -94,13 +165,19 @@ class TkApprover:
 
 
 class ScoutOverlay:
-    """The floating icon and its voice/text loop."""
+    """The floating icon, its label and its voice/text loop."""
 
     def __init__(self, settings: Settings, *, opacity: float | None = None) -> None:
         self.settings = settings
-        self.opacity = settings.overlay_opacity if opacity is None else opacity
+        self.label = settings.overlay_label
+        self.opacity = 0.95 if opacity is None else opacity
+        if os.name == "nt":
+            with contextlib.suppress(Exception):
+                import ctypes
+
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
         self.root = tk.Tk()
-        self.root.title("Scout")
+        self.root.title(f"Scout - {self.label}")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", self.opacity)
@@ -111,15 +188,15 @@ class ScoutOverlay:
 
         self.canvas = tk.Canvas(
             self.root,
-            width=SIZE,
-            height=SIZE,
+            width=WIDTH,
+            height=HEIGHT,
             bg=TRANSPARENT,
             highlightthickness=0,
             bd=0,
             cursor="hand2",
         )
         self.canvas.pack()
-        self._draw_orb()
+        self._draw_panel()
 
         self.approver = TkApprover(self.root)
         self.provider: ModelProvider
@@ -154,25 +231,59 @@ class ScoutOverlay:
 
     # ------------------------------------------------------------------ drawing
 
-    def _draw_orb(self) -> None:
-        self.ring = self.canvas.create_oval(
-            3, 3, SIZE - 3, SIZE - 3, outline=COLORS["idle"], width=2
+    def _draw_panel(self) -> None:
+        _rounded_panel(self.canvas, 1, 1, WIDTH - 1, HEIGHT - 1, 24)
+        cx, cy = ORB_CENTER
+        self.ring = self.canvas.create_oval(*RING_BOX, outline=COLORS["idle"], width=2, fill="")
+        self.canvas.create_oval(
+            cx - 16,
+            cy - 16,
+            cx + 16,
+            cy + 16,
+            fill=PANEL_FILL,
+            outline="",
         )
-        self.canvas.create_oval(9, 9, SIZE - 9, SIZE - 9, fill=ORB_FILL, outline="")
         # A tiny microphone drawn from primitives, so no font is required.
-        self.canvas.create_oval(27, 18, 37, 38, fill=MIC, outline="")
-        self.canvas.create_line(32, 38, 32, 45, fill=MIC, width=2)
-        self.canvas.create_line(26, 45, 38, 45, fill=MIC, width=2)
+        self.canvas.create_oval(cx - 5, cy - 15, cx + 5, cy + 5, fill=MIC, outline="")
+        self.canvas.create_line(cx, cy + 5, cx, cy + 12, fill=MIC, width=2)
+        self.canvas.create_line(cx - 6, cy + 12, cx + 6, cy + 12, fill=MIC, width=2)
         self.canvas.create_arc(
-            23, 27, 41, 45, start=200, extent=140, style="arc", outline=MIC, width=2
+            cx - 10,
+            cy - 5,
+            cx + 10,
+            cy + 13,
+            start=200,
+            extent=140,
+            style="arc",
+            outline=MIC,
+            width=2,
+        )
+        self.canvas.create_text(
+            76,
+            28,
+            text=self.label,
+            fill=TEXT,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            width=164,
+        )
+        self.status_text = self.canvas.create_text(
+            76,
+            52,
+            text=STATE_TEXT["idle"],
+            fill=MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+            width=164,
         )
 
     def _apply_state(self, state: str) -> None:
         self.state = state
         self.canvas.itemconfigure(self.ring, outline=COLORS.get(state, COLORS["idle"]))
+        self.canvas.itemconfigure(self.status_text, text=STATE_TEXT.get(state, ""))
         if state == "idle":
             self.canvas.itemconfigure(self.ring, width=2)
-            self.canvas.coords(self.ring, 3, 3, SIZE - 3, SIZE - 3)
+            self.canvas.coords(self.ring, *RING_BOX)
 
     def _set_state(self, state: str) -> None:
         with contextlib.suppress(RuntimeError):  # window already destroyed
@@ -183,9 +294,15 @@ class ScoutOverlay:
             return
         if self.state == "listening":
             pulse = 2 + 2.5 * (0.5 + 0.5 * math.sin(time.perf_counter() * 6))
-            inset = 3 + 1.5 * math.sin(time.perf_counter() * 6)
+            inset = 1 + 1.5 * math.sin(time.perf_counter() * 6)
             self.canvas.itemconfigure(self.ring, width=round(pulse, 1))
-            self.canvas.coords(self.ring, inset, inset, SIZE - inset, SIZE - inset)
+            self.canvas.coords(
+                self.ring,
+                RING_BOX[0] + inset,
+                RING_BOX[1] + inset,
+                RING_BOX[2] - inset,
+                RING_BOX[3] - inset,
+            )
         self.root.after(100, self._animate)
 
     # ------------------------------------------------------------------ layout
@@ -194,18 +311,21 @@ class ScoutOverlay:
         return self.settings.data_dir / "overlay_position.json"
 
     def _place_window(self) -> None:
-        x = self.root.winfo_screenwidth() - SIZE - 42
-        y = self.root.winfo_screenheight() - SIZE - 130
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = max(20, sw - WIDTH - 40)
+        y = max(20, sh - HEIGHT - 120)
         try:
             saved = json.loads(self._position_file().read_text(encoding="utf-8"))
             sx, sy = int(saved["x"]), int(saved["y"])
-            if 0 <= sx <= self.root.winfo_screenwidth() - SIZE and 0 <= sy <= (
-                self.root.winfo_screenheight() - SIZE
-            ):
+            if 0 <= sx <= sw - WIDTH and 0 <= sy <= sh - HEIGHT:
                 x, y = sx, sy
         except Exception:
             pass
-        self.root.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
+        self.root.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
 
     def _save_position(self) -> None:
         with contextlib.suppress(OSError):
@@ -239,7 +359,7 @@ class ScoutOverlay:
         dx, dy = event.x_root - start_x, event.y_root - start_y
         if abs(dx) + abs(dy) > 3:
             self._dragged = True
-        self.root.geometry(f"{SIZE}x{SIZE}+{win_x + dx}+{win_y + dy}")
+        self.root.geometry(f"{WIDTH}x{HEIGHT}+{win_x + dx}+{win_y + dy}")
 
     def _on_release(self, _event: tk.Event) -> None:
         self._drag_origin = None
@@ -250,7 +370,8 @@ class ScoutOverlay:
 
     def _on_menu(self, event: tk.Event) -> None:
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Ask Scout by typing...", command=self._ask_typed)
+        menu.add_command(label=f"{self.label} - talk now", command=self._start_voice)
+        menu.add_command(label="Ask by typing...", command=self._ask_typed)
         menu.add_separator()
         menu.add_command(label="Quit Scout", command=self.close)
         try:
@@ -283,7 +404,7 @@ class ScoutOverlay:
                 silence_seconds=self.settings.voice_silence_seconds,
             )
             if recording is None:
-                self._show_bubble("Scout", "I did not hear anything. Click the orb and speak.")
+                self._show_bubble("Scout", "I did not hear anything. Click and speak.")
                 return
             self._set_state("thinking")
             text = transcribe_wav(self.provider, recording)
@@ -321,7 +442,7 @@ class ScoutOverlay:
         while self.history and not isinstance(self.history[0], UserTurn):
             self.history.pop(0)
         self._show_bubble(
-            f"Scout · {result.duration_ms / 1000:.1f}s",
+            f"{self.label} · {result.duration_ms / 1000:.1f}s",
             result.text,
             error=not result.completed,
         )
@@ -373,11 +494,11 @@ class ScoutOverlay:
         bubble.update_idletasks()
         width = max(bubble.winfo_reqwidth(), 180)
         height = bubble.winfo_reqheight()
-        x = self.root.winfo_x() + SIZE // 2 - width // 2
+        x = self.root.winfo_x() + WIDTH // 2 - width // 2
         y = self.root.winfo_y() - height - 8
         x = max(8, min(x, self.root.winfo_screenwidth() - width - 8))
         if y < 8:
-            y = self.root.winfo_y() + SIZE + 8
+            y = self.root.winfo_y() + HEIGHT + 8
         bubble.geometry(f"+{x}+{y}")
 
         self._bubble = bubble

@@ -36,8 +36,10 @@ git clone https://github.com/<your-username>/scout.git
 cd scout
 
 python -m venv .venv
-# Windows (PowerShell / Git Bash)
-.venv\Scripts\activate          # PowerShell: .venv\Scripts\Activate.ps1
+# Windows (cmd.exe)
+.venv\Scripts\activate.bat       # use this in cmd.exe, not `source`
+# PowerShell
+.venv\Scripts\Activate.ps1        # PowerShell: .venv\Scripts\Activate.ps1
 # Linux / WSL
 source .venv/bin/activate
 
@@ -62,10 +64,26 @@ SCOUT_WORKSPACES=C:\Users\you\Projects,C:\Users\you\Documents
 
 `.env` is git-ignored. Keys are never logged, printed in full, stored in the database or sent anywhere except the configured provider.
 
-Verify the setup:
+### First-time setup with your own key
+
+Scout is open source, so each user provides their own Gemini API key. Run:
 
 ```bash
-scout doctor
+scout init
+```
+
+You will be prompted to paste your key (it is stored locally only, never sent anywhere except Google). The key is saved to the per-user config file at `global_env_file()` so Scout works from any directory.
+
+If you already have a key saved, running `scout init` again lets you keep or replace it. After `scout init`, you can run:
+
+```bash
+scout
+```
+
+or
+
+```bash
+scout ask "open notepad"
 ```
 
 ### Configuration reference
@@ -80,6 +98,7 @@ scout doctor
 | `SCOUT_VOICE_MAX_SECONDS` | `15` | Max length of one spoken request |
 | `SCOUT_VOICE_SILENCE_SECONDS` | `1.2` | Silence that ends a recording |
 | `SCOUT_OVERLAY_OPACITY` | `0.65` | Floating icon opacity |
+| `SCOUT_OVERLAY_LABEL` | `I told you, right?` | Custom label shown on the floating overlay |
 | `SCOUT_MAX_TOOL_STEPS` | `8` | Max model↔tool round trips per request |
 | `SCOUT_TOOL_TIMEOUT` | `60` | Per-tool timeout (seconds) |
 | `SCOUT_REQUEST_TIMEOUT` | `120` | Provider request timeout (seconds) |

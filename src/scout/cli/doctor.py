@@ -52,7 +52,11 @@ def _check_provider(settings: Settings) -> Check:
 def _check_api_key(settings: Settings) -> Check:
     if settings.api_key.strip():
         return Check("API key", OK, "configured (value not displayed)")
-    return Check("API key", FAIL, "missing; set SCOUT_API_KEY in .env")
+    return Check(
+        "API key",
+        FAIL,
+        "missing; run `scout init` (or set SCOUT_API_KEY) with your own Gemini key",
+    )
 
 
 def _check_sdk() -> Check:

@@ -6,10 +6,12 @@ logs, the database, prompts or error messages.
 
 from __future__ import annotations
 
+import contextlib
+import os
 from pathlib import Path
 from typing import Annotated
 
-from platformdirs import user_data_path, user_log_path
+from platformdirs import user_config_path, user_data_path, user_log_path
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -39,7 +41,6 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="SCOUT_",
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -69,6 +70,7 @@ class Settings(BaseSettings):
     voice_max_seconds: float = Field(default=15.0, gt=1.0, le=60.0)
     voice_silence_seconds: float = Field(default=1.2, gt=0.3, le=5.0)
     overlay_opacity: float = Field(default=0.65, ge=0.3, le=1.0)
+    overlay_label: str = Field(default="scout", max_length=60)
 
     log_level: str = "INFO"
     log_file: Path | None = None
@@ -135,8 +137,8 @@ class Settings(BaseSettings):
     def require_api_key(self) -> str:
         if not self.api_key.strip():
             raise MissingCredentialError(
-                "No API key configured. Set SCOUT_API_KEY in your environment or "
-                "in the project `.env` file (see .env.example)."
+                "No API key configured. Run `scout init` to save your own Gemini "
+                f"key to {global_env_file()}, or set SCOUT_API_KEY in the environment."
             )
         return self.api_key.strip()
 
@@ -149,9 +151,44 @@ class MissingCredentialError(ConfigurationError):
     """Raised when a required credential is absent. Never carries the value."""
 
 
-def load_settings(**overrides: object) -> Settings:
-    """Load settings, translating pydantic errors into a friendly exception."""
+def global_env_file() -> Path:
+    """Per-user `.env` (outside the repo) so an installed Scout works from anywhere."""
+    return user_config_path(APP_NAME, appauthor=False) / ".env"
+
+
+def env_files() -> tuple[str, str]:
+    """Config files in increasing priority: user config, then project `.env`."""
+    return str(global_env_file()), ".env"
+
+
+def save_api_key(api_key: str, path: Path | None = None) -> Path:
+    """Store the user's own key in the per-user `.env`, preserving other settings."""
+    key = api_key.strip()
+    if not key or any(char.isspace() for char in key):
+        raise ConfigurationError("The API key must be a single value without spaces.")
+    target = path or global_env_file()
     try:
-        return Settings(**overrides)  # type: ignore[arg-type]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+        setting = "SCOUT_API_KEY"
+        for index, line in enumerate(lines):
+            name = line.split("=", 1)[0].strip()
+            if name == setting:
+                lines[index] = f"{setting}={key}"
+                break
+        else:
+            lines.append(f"{setting}={key}")
+        target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(target, 0o600)
+    except OSError as exc:
+        raise ConfigurationError(f"Could not save the API key to {target}: {exc}") from exc
+    return target
+
+
+def load_settings(**overrides: object) -> Settings:
+    """Load settings from the user config, the project `.env`, then env vars."""
+    try:
+        return Settings(_env_file=env_files(), **overrides)  # type: ignore[arg-type]
     except Exception as exc:  # pydantic ValidationError or ValueError
         raise ConfigurationError(f"Invalid configuration: {exc}") from exc

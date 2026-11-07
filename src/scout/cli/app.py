@@ -22,7 +22,13 @@ from scout.cli.render import (
     render_tool_start,
     render_tools_table,
 )
-from scout.config import ConfigurationError, Settings, load_settings
+from scout.config import (
+    ConfigurationError,
+    Settings,
+    global_env_file,
+    load_settings,
+    save_api_key,
+)
 from scout.logging import configure_logging
 from scout.providers import ModelProvider, ProviderError, Turn, UserTurn, create_provider
 from scout.tools import build_registry
@@ -45,12 +51,37 @@ def _fail(message: str) -> None:
     raise typer.Exit(1)
 
 
-def _load() -> Settings:
+def _prompt_for_key(settings: Settings) -> Settings:
+    """First-run onboarding: ask for the user's own key and store it per user."""
+    if not sys.stdin.isatty():
+        _fail(
+            "No API key configured. Run `scout init` first, or set SCOUT_API_KEY. "
+            "Get a key at https://aistudio.google.com/apikey"
+        )
+    console.print(
+        "[bold cyan]Scout needs your own Gemini API key.[/bold cyan]\n"
+        "[dim]Create one at https://aistudio.google.com/apikey — it is stored only "
+        "on this computer and is never sent anywhere except Google.[/dim]"
+    )
+    key = typer.prompt("Paste your Gemini API key", hide_input=True)
+    if not key.strip():
+        _fail("No API key entered. Run `scout init` when you have one.")
+    try:
+        path = save_api_key(key)
+    except ConfigurationError as exc:
+        _fail(str(exc))
+    console.print(f"[green]Saved[/green] your key to [bold]{path}[/bold]\n")
+    return settings.model_copy(update={"api_key": key.strip()})
+
+
+def _load(*, prompt_for_key: bool = True) -> Settings:
     try:
         settings = load_settings()
     except ConfigurationError as exc:
         _fail(str(exc))
     configure_logging(settings)
+    if prompt_for_key and not settings.api_key.strip():
+        settings = _prompt_for_key(settings)
     return settings
 
 
@@ -129,9 +160,53 @@ def ask(
 
 
 @app.command()
+def init(
+    check: bool = typer.Option(
+        True, "--check/--no-check", help="Verify the key with one small provider request."
+    ),
+) -> None:
+    """Save your own Gemini API key in a per-user config file (safe for open source)."""
+    settings = _load(prompt_for_key=False)
+    console.print(
+        "[bold cyan]Set up Scout[/bold cyan]\n"
+        "[dim]Scout is open source and never ships a shared key. Use your own from "
+        "https://aistudio.google.com/apikey[/dim]"
+    )
+    existing = bool(settings.api_key.strip())
+    if existing:
+        console.print("[dim]A key is already configured. Press Enter to keep it.[/dim]")
+    key = typer.prompt(
+        "Paste your Gemini API key", hide_input=True, default="", show_default=False
+    ).strip()
+    if key:
+        try:
+            path = save_api_key(key)
+        except ConfigurationError as exc:
+            _fail(str(exc))
+        settings = settings.model_copy(update={"api_key": key})
+        console.print(f"[green]Saved[/green] your key to [bold]{path}[/bold]")
+    elif existing:
+        console.print("[dim]Keeping the existing key.[/dim]")
+    else:
+        _fail("No API key entered. Run `scout init` again when you have one.")
+
+    if not check:
+        return
+    try:
+        provider = create_provider(settings)
+        text = provider.verify()
+    except (ConfigurationError, ProviderError) as exc:
+        _fail(f"The key was saved, but the check failed: {exc}")
+    console.print(
+        f"[green]Your key works.[/green] [dim]model replied: {text[:40] or '(empty)'}[/dim]\n"
+        "[dim]Next: `scout` to chat, `scout voice` to talk, `scout overlay` for the icon.[/dim]"
+    )
+
+
+@app.command()
 def status() -> None:
     """Show provider, model and workspace configuration."""
-    settings = _load()
+    settings = _load(prompt_for_key=False)
     registry = build_registry()
 
     table = Table(title=f"scout v{__version__}", header_style="bold cyan", show_header=False)
@@ -152,14 +227,14 @@ def status() -> None:
 @app.command()
 def tools() -> None:
     """List every registered tool and its permission level."""
-    _load()
+    _load(prompt_for_key=False)
     render_tools_table(build_registry().all())
 
 
 @app.command(name="config")
 def show_config() -> None:
     """Show the resolved configuration with secrets masked."""
-    settings = _load()
+    settings = _load(prompt_for_key=False)
 
     table = Table(title="scout configuration", header_style="bold cyan", show_header=False)
     table.add_column("key", style="bold")
@@ -168,6 +243,7 @@ def show_config() -> None:
         "provider": settings.provider,
         "model": settings.model,
         "api key": "configured" if settings.api_key.strip() else "[red]missing[/red]",
+        "user config": str(global_env_file()),
         "max tool steps": str(settings.max_tool_steps),
         "thinking budget": "default"
         if settings.thinking_budget < 0
@@ -191,7 +267,7 @@ def doctor(
     ),
 ) -> None:
     """Diagnose installation, configuration and connectivity."""
-    settings = _load()
+    settings = _load(prompt_for_key=False)
     raise typer.Exit(run_doctor(settings, check_api=check_api))
 
 
@@ -306,8 +382,18 @@ def interactive() -> None:
                 break
             if command == "/help":
                 console.print(
-                    "[dim]/tools  list tools · /clear  clear conversation · /exit  quit[/dim]"
+                    "[dim]/overlay  activate floating icon · /tools  list tools · /clear  clear conversation · /exit  quit[/dim]"
                 )
+                continue
+            if command == "/overlay":
+                import subprocess
+
+                subprocess.Popen(
+                    [sys.executable, "-m", "scout", "overlay"],
+                    creationflags=subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0,
+                    close_fds=True,
+                )
+                console.print("[green]✓ Scout floating icon activated on your screen.[/green]")
                 continue
             if command == "/tools":
                 render_tools_table(registry.all())
