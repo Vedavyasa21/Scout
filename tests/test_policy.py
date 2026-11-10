@@ -35,6 +35,13 @@ def test_session_allow_is_remembered() -> None:
     assert engine.session_allowed() == frozenset({"type_text"})
 
 
+def test_full_access_bypasses_approval() -> None:
+    engine = PolicyEngine(full_access=True)
+    tool = FakeTool("danger", PermissionLevel.HIGH_RISK)
+    assert engine.requires_approval(tool) is False
+    assert engine.requires_approval(tool, full_access=True) is False
+
+
 def test_request_carries_context() -> None:
     request = ApprovalRequest(
         tool="type_text",

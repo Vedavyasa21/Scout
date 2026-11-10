@@ -131,3 +131,36 @@ def transcribe_wav(provider: ModelProvider, recording: Recording) -> str:
     if not transcript:
         raise ProviderError("No speech was detected in the recording.")
     return transcript
+
+
+from scout.voice.wake import (  # noqa: E402 - circular import guarded by module init order
+    GlobalHotkeyListener,
+    WakeWordListener,
+    get_custom_enable_hook,
+    get_custom_wake_detector,
+    load_custom_code_feature,
+    register_custom_enable_hook,
+    register_custom_wake_detector,
+    trigger_custom_enable_hook,
+)
+
+__all__ = [
+    "BLOCK_SECONDS",
+    "CHANNELS",
+    "GlobalHotkeyListener",
+    "Recording",
+    "SAMPLERATE",
+    "SPEECH_RMS",
+    "VoiceError",
+    "WakeWordListener",
+    "encode_wav",
+    "get_custom_enable_hook",
+    "get_custom_wake_detector",
+    "load_custom_code_feature",
+    "record_wav",
+    "register_custom_enable_hook",
+    "register_custom_wake_detector",
+    "rms",
+    "transcribe_wav",
+    "trigger_custom_enable_hook",
+]

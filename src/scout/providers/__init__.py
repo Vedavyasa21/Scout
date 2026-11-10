@@ -10,6 +10,8 @@ from scout.config import ConfigurationError, MissingCredentialError, Settings
 from scout.providers.base import (
     AssistantTurn,
     ModelProvider,
+    ProviderCapabilities,
+    ProviderChunk,
     ProviderError,
     ProviderReply,
     ToolCall,
@@ -50,6 +52,8 @@ __all__ = [
     "ConfigurationError",
     "MissingCredentialError",
     "ModelProvider",
+    "ProviderCapabilities",
+    "ProviderChunk",
     "ProviderError",
     "ProviderReply",
     "ToolCall",

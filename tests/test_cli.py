@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 import scout.cli.app as cli
 from scout.cli.approval import RichApprover
 from scout.providers import ModelProvider, ProviderReply, ToolCall, Turn
+from scout.security.audit import AuditLedger
 from scout.security.policy import ApprovalDecision, ApprovalRequest
 from scout.tools import PermissionLevel
 
@@ -49,6 +50,16 @@ def test_tools_lists_registry(patched) -> None:
     assert result.exit_code == 0
     assert "get_os_info" in result.output
     assert "launch_application" in result.output
+
+
+def test_audit_prints_recent_records(patched) -> None:
+    AuditLedger(patched.resolved_audit_file).record(
+        "approval_decision", tool="type_text", decision="allow_once"
+    )
+    result = runner.invoke(cli.app, ["audit"])
+    assert result.exit_code == 0
+    assert "approval_decision" in result.output
+    assert "type_text" in result.output
 
 
 def test_status_masks_key(patched) -> None:
@@ -157,3 +168,34 @@ def test_doctor_missing_key_exits_1(patched) -> None:
 def test_doctor_with_key_passes(patched) -> None:
     result = runner.invoke(cli.app, ["doctor"])
     assert "scout doctor" in result.output
+
+
+def test_enable_command_invokes_overlay(patched, monkeypatch) -> None:
+    calls = []
+
+    def fake_run_overlay(settings, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("scout.desktop.overlay.run_overlay", fake_run_overlay)
+    result = runner.invoke(cli.app, ["enable"])
+    assert result.exit_code == 0
+    assert "Scout Assistant Enabled" in result.output
+    assert len(calls) == 1
+    assert calls[0]["auto_listen"] is True
+    assert calls[0]["enable_wake_word"] is True
+    assert calls[0]["enable_hotkey"] is True
+
+
+def test_interactive_enable_command(patched, monkeypatch) -> None:
+    spawned = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            spawned.append(cmd)
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+    monkeypatch.setattr(cli, "create_provider", lambda _s: FakeProvider([]))
+    result = runner.invoke(cli.app, [], input="enable\n/exit\n")
+    assert result.exit_code == 0
+    assert "Scout Assistant Mode enabled!" in result.output
+    assert any("enable" in str(cmd) for cmd in spawned)

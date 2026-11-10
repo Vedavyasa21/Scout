@@ -1,3 +1,3 @@
 @echo off
-cd /d "C:\MyPersonalprojects\Scout"
-start "" ".venv\Scripts\pythonw.exe" -m scout overlay
+cd /d "%~dp0"
+start "" "%~dp0.venv\Scripts\pythonw.exe" -m scout overlay

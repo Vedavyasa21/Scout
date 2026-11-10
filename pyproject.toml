@@ -34,6 +34,10 @@ dependencies = [
     "pyautogui>=0.9.54",
     "pygetwindow>=0.0.9",
     "sounddevice>=0.4.6",
+    "pillow>=10.0",
+    "pystray>=0.19.5",
+    "pyqt6>=6.5",
+    "speechrecognition>=3.14",
 ]
 
 [project.optional-dependencies]

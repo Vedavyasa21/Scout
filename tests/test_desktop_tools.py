@@ -189,6 +189,18 @@ def test_launch_app_prefers_exact_match(settings, monkeypatch, tmp_path: Path) -
 def test_desktop_tools_are_registered_with_risk_levels() -> None:
     tools = {tool.name: tool for tool in build_registry().all()}
     assert tools["list_windows"].permission is PermissionLevel.READ
+    assert tools["search_web"].permission is PermissionLevel.LOW_RISK
     assert tools["type_text"].permission is PermissionLevel.EXECUTE
     assert tools["type_text"].requires_confirmation is True
     assert tools["lock_screen"].permission is PermissionLevel.HIGH_RISK
+
+
+def test_search_web_opens_browser(settings, monkeypatch) -> None:
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        desktop.webbrowser, "open", lambda url, **_kw: opened_urls.append(url) or True
+    )
+    result = desktop.search_web({"query": "python tutorial"}, _context(settings))
+    assert result.ok
+    assert len(opened_urls) == 1
+    assert "google.com/search?q=python+tutorial" in opened_urls[0]

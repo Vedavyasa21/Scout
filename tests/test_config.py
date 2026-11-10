@@ -27,6 +27,21 @@ def test_csv_lists_are_parsed(workspace: Path) -> None:
     assert settings.allowed_apps == ["notepad", "calc"]
 
 
+def test_phase2_csv_lists_are_parsed(workspace: Path) -> None:
+    settings = Settings(
+        api_key="k",
+        workspaces=[workspace],
+        denied_tools="lock_screen, type_text",
+        auto_approve_tools="set_volume",
+        egress_allowlist="example.com, docs.example.com",
+        screenshot_blocked_titles="vault, bank",
+    )
+    assert settings.denied_tools == ["lock_screen", "type_text"]
+    assert settings.auto_approve_tools == ["set_volume"]
+    assert settings.egress_allowlist == ["example.com", "docs.example.com"]
+    assert settings.screenshot_blocked_titles == ["vault", "bank"]
+
+
 def test_missing_workspace_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not exist"):
         Settings(api_key="k", workspaces=[tmp_path / "nope"])

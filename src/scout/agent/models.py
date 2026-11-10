@@ -34,6 +34,7 @@ class AgentResult:
     task_id: str = ""
     duration_ms: int = 0
     model_ms: int = 0
+    plan: dict[str, Any] | None = None
 
     @property
     def succeeded_tools(self) -> int:
@@ -52,3 +53,4 @@ class AgentHooks:
     on_tool_start: Callable[[ToolCall], None] | None = None
     on_tool_result: Callable[[ToolCall, ToolResult], None] | None = None
     on_assistant_text: Callable[[str], None] | None = None
+    on_model_chunk: Callable[[str], None] | None = None

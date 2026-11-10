@@ -28,6 +28,19 @@ DEFAULT_ALLOWED_APPS: tuple[str, ...] = (
     "gedit",
 )
 
+# Whole screenshots are refused when the focused window looks sensitive.
+DEFAULT_SCREENSHOT_BLOCKED_TITLES: tuple[str, ...] = (
+    "1password",
+    "bitwarden",
+    "keepass",
+    "lastpass",
+    "dashlane",
+    "authenticator",
+    "password manager",
+    "online banking",
+    "bank account",
+)
+
 
 def _split_csv(value: object) -> object:
     """Accept comma-separated strings for list fields."""
@@ -71,11 +84,42 @@ class Settings(BaseSettings):
     voice_silence_seconds: float = Field(default=1.2, gt=0.3, le=5.0)
     overlay_opacity: float = Field(default=0.65, ge=0.3, le=1.0)
     overlay_label: str = Field(default="scout", max_length=60)
+    full_access: bool = Field(
+        default=False,
+        description=(
+            "When true, bypasses manual tool approval checks. Disabled by default; "
+            "enable only for fully trusted, non-interactive automation."
+        ),
+    )
+    # Hard-deny wins over full access; auto-approve skips the prompt only.
+    denied_tools: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    auto_approve_tools: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    egress_allowlist: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    audit_enabled: bool = True
+    audit_file: Path | None = None
+
+    screenshot_blocked_titles: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_SCREENSHOT_BLOCKED_TITLES)
+    )
+    screenshot_retention_days: int = Field(default=7, ge=0, le=365)
+    screenshot_max_files: int = Field(default=50, ge=0, le=1000)
+
+    # Cloud wake-word audio is opt-in; hotkey/custom local detectors still work.
+    wake_cloud_fallback: bool = False
 
     log_level: str = "INFO"
     log_file: Path | None = None
 
-    @field_validator("workspaces", "allowed_apps", mode="before")
+    @field_validator(
+        "workspaces",
+        "allowed_apps",
+        "denied_tools",
+        "auto_approve_tools",
+        "egress_allowlist",
+        "screenshot_blocked_titles",
+        mode="before",
+    )
     @classmethod
     def _parse_csv(cls, value: object) -> object:
         return _split_csv(value)
@@ -131,14 +175,24 @@ class Settings(BaseSettings):
         return path
 
     @property
+    def resolved_audit_file(self) -> Path:
+        """Durable approval/tool ledger, separate from rotating diagnostics."""
+        if self.audit_file:
+            path = self.audit_file.expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        return self.data_dir / "audit.jsonl"
+
+    @property
     def transcription_model(self) -> str:
         return self.voice_model.strip() or self.model
 
     def require_api_key(self) -> str:
         if not self.api_key.strip():
             raise MissingCredentialError(
-                "No API key configured. Run `scout init` to save your own Gemini "
-                f"key to {global_env_file()}, or set SCOUT_API_KEY in the environment."
+                "No API key configured. Run `scout init` to store your own Gemini "
+                "key in Windows Credential Manager (or the per-user config), or set "
+                "SCOUT_API_KEY in the environment."
             )
         return self.api_key.strip()
 
@@ -161,11 +215,29 @@ def env_files() -> tuple[str, str]:
     return str(global_env_file()), ".env"
 
 
-def save_api_key(api_key: str, path: Path | None = None) -> Path:
-    """Store the user's own key in the per-user `.env`, preserving other settings."""
+def _remove_persisted_key(path: Path) -> None:
+    """Drop a plaintext key after it has been moved to Credential Manager."""
+    try:
+        if not path.exists():
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if line.split("=", 1)[0].strip() != "SCOUT_API_KEY"]
+        path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def save_api_key(api_key: str, path: Path | None = None) -> Path | None:
+    """Store the key securely, returning the file path or None for Credential Manager."""
     key = api_key.strip()
     if not key or any(char.isspace() for char in key):
         raise ConfigurationError("The API key must be a single value without spaces.")
+    if path is None:
+        from scout.security.credentials import save_credential
+
+        if save_credential(key):
+            _remove_persisted_key(global_env_file())
+            return None
     target = path or global_env_file()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -187,8 +259,15 @@ def save_api_key(api_key: str, path: Path | None = None) -> Path:
 
 
 def load_settings(**overrides: object) -> Settings:
-    """Load settings from the user config, the project `.env`, then env vars."""
+    """Load settings from env, `.env`, then Credential Manager."""
     try:
-        return Settings(_env_file=env_files(), **overrides)  # type: ignore[arg-type]
+        settings = Settings(_env_file=env_files(), **overrides)  # type: ignore[arg-type]
     except Exception as exc:  # pydantic ValidationError or ValueError
         raise ConfigurationError(f"Invalid configuration: {exc}") from exc
+    if not settings.api_key.strip():
+        from scout.security.credentials import load_credential
+
+        stored = load_credential()
+        if stored:
+            settings = settings.model_copy(update={"api_key": stored})
+    return settings

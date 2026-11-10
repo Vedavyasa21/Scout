@@ -14,8 +14,19 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
+from scout.perception import (
+    PerceptionError,
+    active_window_info,
+    capture_screen,
+    crop_region,
+    ocr_image,
+    prune_screenshots,
+    save_screenshot,
+    sensitive_title,
+)
+from scout.security.egress import EgressDeniedError, EgressPolicy
 from scout.tools.base import (
     PermissionLevel,
     Tool,
@@ -228,16 +239,117 @@ def screen_size(_args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
 
 
 def screenshot(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    gui = _gui()
-    folder = ctx.settings.data_dir / "screenshots"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"shot-{time.strftime('%Y%m%d-%H%M%S')}.png"
+    patterns = list(ctx.settings.screenshot_blocked_titles)
+    title = str(active_window_info().get("title", ""))
+    blocked = sensitive_title(title, patterns)
+    if blocked:
+        return _fail(
+            f"Screenshot blocked: the focused window matches the sensitive pattern "
+            f"'{blocked}'. Switch to a non-sensitive window and try again."
+        )
+
     try:
-        image = gui.screenshot()
-        image.save(path)
-    except Exception as exc:
-        return _fail(f"Screenshot failed: {exc}")
-    return _ok({"path": str(path), "width": image.width, "height": image.height})
+        image, masked = capture_screen(patterns)
+        path = save_screenshot(image, ctx.settings.data_dir / "screenshots", "shot")
+    except PerceptionError as exc:
+        return _fail(str(exc))
+    prune_screenshots(
+        ctx.settings.data_dir / "screenshots",
+        ctx.settings.screenshot_retention_days,
+        ctx.settings.screenshot_max_files,
+    )
+    return _ok(
+        {
+            "path": str(path),
+            "width": image.width,
+            "height": image.height,
+            "masked_windows": masked,
+        }
+    )
+
+
+def screenshot_region(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    region = {
+        "x": args["x"],
+        "y": args["y"],
+        "width": args["width"],
+        "height": args["height"],
+    }
+    patterns = list(ctx.settings.screenshot_blocked_titles)
+    title = str(active_window_info().get("title", ""))
+    blocked = sensitive_title(title, patterns)
+    if blocked:
+        return _fail(
+            f"Screenshot blocked: the focused window matches the sensitive pattern "
+            f"'{blocked}'. Switch to a non-sensitive window and try again."
+        )
+
+    try:
+        image, masked = capture_screen(patterns)
+        cropped = crop_region(image, region)
+        path = save_screenshot(cropped, ctx.settings.data_dir / "screenshots", "region")
+    except PerceptionError as exc:
+        return _fail(str(exc))
+    prune_screenshots(
+        ctx.settings.data_dir / "screenshots",
+        ctx.settings.screenshot_retention_days,
+        ctx.settings.screenshot_max_files,
+    )
+    return _ok(
+        {
+            "path": str(path),
+            "width": cropped.width,
+            "height": cropped.height,
+            "region": region,
+            "masked_windows": masked,
+        }
+    )
+
+
+def active_window(_args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
+    return _ok(active_window_info())
+
+
+def read_screen_text(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Capture (optionally a region), mask sensitive windows, then OCR locally."""
+    region: dict[str, int] | None = None
+    keys = ("x", "y", "width", "height")
+    if any(key in args for key in keys):
+        if not all(key in args for key in keys):
+            return _fail("Provide x, y, width and height together for a region.")
+        region = {key: args[key] for key in keys}
+
+    patterns = list(ctx.settings.screenshot_blocked_titles)
+    blocked = sensitive_title(str(active_window_info().get("title", "")), patterns)
+    if blocked:
+        return _fail(
+            f"Screen reading blocked: the focused window matches the sensitive pattern '{blocked}'."
+        )
+
+    try:
+        image, masked = capture_screen(patterns)
+        target = crop_region(image, region) if region is not None else image
+        path = save_screenshot(target, ctx.settings.data_dir / "screenshots", "ocr")
+    except PerceptionError as exc:
+        return _fail(str(exc))
+    prune_screenshots(
+        ctx.settings.data_dir / "screenshots",
+        ctx.settings.screenshot_retention_days,
+        ctx.settings.screenshot_max_files,
+    )
+    try:
+        text = ocr_image(path)
+    except PerceptionError as exc:
+        return _fail(str(exc))
+    return _ok(
+        {
+            "text": text[:20000],
+            "truncated": len(text) > 20000,
+            "path": str(path),
+            "region": region,
+            "masked_windows": masked,
+        }
+    )
 
 
 def set_volume(args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
@@ -256,11 +368,15 @@ def set_volume(args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
 # --------------------------------------------------------------------------- launching
 
 
-def open_url(args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
+def open_url(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     url = args["url"].strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return _fail("Only absolute http:// or https:// URLs are allowed.")
+    try:
+        EgressPolicy(ctx.settings.egress_allowlist).check(url)
+    except EgressDeniedError as exc:
+        return _fail(str(exc))
     try:
         opened = webbrowser.open(url, new=2)
     except Exception as exc:
@@ -268,6 +384,24 @@ def open_url(args: dict[str, Any], _ctx: ToolContext) -> ToolResult:
     if not opened:
         return _fail("No browser accepted the URL.")
     return _ok({"opened": url})
+
+
+def search_web(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    query = args["query"].strip()
+    if not query:
+        return _fail("Search query cannot be empty.")
+    url = f"https://www.google.com/search?q={quote_plus(query)}"
+    try:
+        EgressPolicy(ctx.settings.egress_allowlist).check(url)
+    except EgressDeniedError as exc:
+        return _fail(str(exc))
+    try:
+        opened = webbrowser.open(url, new=2)
+    except Exception as exc:
+        return _fail(f"Could not open browser for search: {exc}")
+    if not opened:
+        return _fail("No browser accepted the search URL.")
+    return _ok({"opened": url, "query": query})
 
 
 def start_menu_roots() -> list[Path]:
@@ -359,6 +493,19 @@ def register(registry: ToolRegistry) -> None:
             permission=PermissionLevel.READ,
             handler=list_windows,
             tags=("desktop",),
+        )
+    )
+    registry.register(
+        Tool(
+            name="active_window",
+            description=(
+                "Inspect the focused window: title, process name and pid, position, "
+                "size and minimized state."
+            ),
+            parameters=_schema({}),
+            permission=PermissionLevel.READ,
+            handler=active_window,
+            tags=("desktop", "perception"),
         )
     )
     registry.register(
@@ -484,6 +631,47 @@ def register(registry: ToolRegistry) -> None:
     )
     registry.register(
         Tool(
+            name="screenshot_region",
+            description=(
+                "Capture a rectangular screen region to PNG. Sensitive inactive "
+                "windows are masked; the focused window is refused if sensitive."
+            ),
+            parameters=_schema(
+                {
+                    "x": {"type": "integer", "minimum": 0, "maximum": 20000},
+                    "y": {"type": "integer", "minimum": 0, "maximum": 20000},
+                    "width": {"type": "integer", "minimum": 1, "maximum": 20000},
+                    "height": {"type": "integer", "minimum": 1, "maximum": 20000},
+                },
+                ["x", "y", "width", "height"],
+            ),
+            permission=PermissionLevel.LOW_RISK,
+            handler=screenshot_region,
+            tags=("desktop", "perception"),
+        )
+    )
+    registry.register(
+        Tool(
+            name="read_screen_text",
+            description=(
+                "Read visible text from the screen (or a rectangular region) using "
+                "the local Windows OCR engine. Sensitive windows are masked/refused."
+            ),
+            parameters=_schema(
+                {
+                    "x": {"type": "integer", "minimum": 0, "maximum": 20000},
+                    "y": {"type": "integer", "minimum": 0, "maximum": 20000},
+                    "width": {"type": "integer", "minimum": 1, "maximum": 20000},
+                    "height": {"type": "integer", "minimum": 1, "maximum": 20000},
+                }
+            ),
+            permission=PermissionLevel.LOW_RISK,
+            handler=read_screen_text,
+            tags=("desktop", "perception", "ocr"),
+        )
+    )
+    registry.register(
+        Tool(
             name="set_volume",
             description="Turn the system volume up/down by steps, or mute it.",
             parameters=_schema(
@@ -508,6 +696,19 @@ def register(registry: ToolRegistry) -> None:
             ),
             permission=PermissionLevel.LOW_RISK,
             handler=open_url,
+            tags=("desktop",),
+        )
+    )
+    registry.register(
+        Tool(
+            name="search_web",
+            description="Search the web for a query using Google in the default browser.",
+            parameters=_schema(
+                {"query": {"type": "string", "minLength": 1, "maxLength": 500}},
+                ["query"],
+            ),
+            permission=PermissionLevel.LOW_RISK,
+            handler=search_web,
             tags=("desktop",),
         )
     )

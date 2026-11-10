@@ -9,6 +9,7 @@ depend on.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -21,6 +22,14 @@ class ApprovalDecision(StrEnum):
 
     ALLOW_ONCE = "allow_once"
     ALLOW_SESSION = "allow_session"
+    DENY = "deny"
+
+
+class PermissionDecision(StrEnum):
+    """The central permission manager's answer before execution."""
+
+    AUTO = "auto"
+    ASK = "ask"
     DENY = "deny"
 
 
@@ -70,20 +79,63 @@ class PolicyEngine:
 
     AUTO_ALLOWED = frozenset({PermissionLevel.READ, PermissionLevel.LOW_RISK})
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        full_access: bool = False,
+        *,
+        auto_approve: list[str] | tuple[str, ...] = (),
+        deny: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        self._lock = threading.Lock()
+        self.full_access = full_access
+        self._auto_approve: set[str] = set(auto_approve)
+        self._denied: set[str] = set(deny)
         self._session_allowed: set[str] = set()
 
-    def requires_approval(self, tool: Any) -> bool:
-        permission: PermissionLevel = tool.permission
-        if permission in self.AUTO_ALLOWED:
-            return False
-        return tool.name not in self._session_allowed
+    def configure(
+        self,
+        *,
+        full_access: bool | None = None,
+        auto_approve: list[str] | tuple[str, ...] | None = None,
+        deny: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        """Apply settings to the central policy (thread-safe, idempotent)."""
+        with self._lock:
+            if full_access is not None:
+                self.full_access = full_access
+            if auto_approve is not None:
+                self._auto_approve = set(auto_approve)
+            if deny is not None:
+                self._denied = set(deny)
+
+    def evaluate(self, tool: Any, full_access: bool | None = None) -> PermissionDecision:
+        """Return AUTO, ASK or a hard DENY. Hard deny beats full access."""
+        with self._lock:
+            if tool.name in self._denied:
+                return PermissionDecision.DENY
+            if full_access or (full_access is None and self.full_access):
+                return PermissionDecision.AUTO
+            if tool.permission in self.AUTO_ALLOWED:
+                return PermissionDecision.AUTO
+            if tool.name in self._auto_approve or tool.name in self._session_allowed:
+                return PermissionDecision.AUTO
+            return PermissionDecision.ASK
+
+    def requires_approval(self, tool: Any, full_access: bool | None = None) -> bool:
+        return self.evaluate(tool, full_access) is PermissionDecision.ASK
 
     def remember(self, tool_name: str) -> None:
-        self._session_allowed.add(tool_name)
+        with self._lock:
+            self._session_allowed.add(tool_name)
 
     def forget_all(self) -> None:
-        self._session_allowed.clear()
+        with self._lock:
+            self._session_allowed.clear()
 
     def session_allowed(self) -> frozenset[str]:
-        return frozenset(self._session_allowed)
+        with self._lock:
+            return frozenset(self._session_allowed)
+
+    def denied_tools(self) -> frozenset[str]:
+        with self._lock:
+            return frozenset(self._denied)

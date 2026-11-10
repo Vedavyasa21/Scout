@@ -23,5 +23,7 @@ def settings(workspace: Path, tmp_path: Path) -> Settings:
         workspaces=[workspace],
         allowed_apps=["notepad", "calc"],
         log_file=tmp_path / "scout-test.log",
+        audit_file=tmp_path / "audit.jsonl",
         max_tool_steps=4,
+        full_access=False,
     )

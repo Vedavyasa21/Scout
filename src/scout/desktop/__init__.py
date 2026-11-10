@@ -1,1 +1,1 @@
-"""Desktop UI: the floating Scout icon."""
+"""Desktop UI: the floating Scout icon and the animated desktop character."""

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from scout.providers.base import (
     AssistantTurn,
     ModelProvider,
+    ProviderCapabilities,
+    ProviderChunk,
     ProviderError,
     ProviderReply,
     ToolCall,
@@ -151,6 +154,39 @@ def _extract_reply(response: Any) -> ProviderReply:
     )
 
 
+def _extract_stream_chunk(
+    response: Any,
+) -> tuple[str, list[ToolCall], list[Any], str | None]:
+    """Pull the text delta, tool calls and raw parts out of one stream chunk."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return "", [], [], None
+
+    candidate = candidates[0]
+    finish = getattr(candidate, "finish_reason", None)
+    finish_name = getattr(finish, "name", None) or (str(finish) if finish else None)
+    parts = list(getattr(getattr(candidate, "content", None), "parts", None) or [])
+
+    text_chunks: list[str] = []
+    calls: list[ToolCall] = []
+    for part in parts:
+        function_call = getattr(part, "function_call", None)
+        if function_call is not None:
+            calls.append(
+                ToolCall(
+                    name=function_call.name or "",
+                    arguments=dict(function_call.args or {}),
+                    call_id=function_call.id or "",
+                )
+            )
+            continue
+        text = getattr(part, "text", None)
+        if text and not getattr(part, "thought", False):
+            text_chunks.append(text)
+
+    return "".join(text_chunks), calls, parts, finish_name
+
+
 def _friendly_error(exc: Exception, api_key: str) -> str:
     message = redact_secrets(str(exc), [api_key])
     lowered = message.lower()
@@ -203,13 +239,21 @@ class GeminiProvider(ModelProvider):
             http_options=types.HttpOptions(timeout=int(request_timeout * 1000)),
         )
 
-    def complete(
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            streaming=True,
+            tool_calling=True,
+            audio_input=True,
+        )
+
+    def _build_request(
         self,
-        *,
         system: str,
         turns: Sequence[Turn],
         tools: Sequence[dict[str, Any]],
-    ) -> ProviderReply:
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Build provider contents and config arguments shared by both paths."""
         types = self._types
         config_args: dict[str, Any] = {
             "system_instruction": system,
@@ -225,13 +269,22 @@ class GeminiProvider(ModelProvider):
             config_args["thinking_config"] = types.ThinkingConfig(
                 thinking_level=self.thinking_level
             )
-        config = types.GenerateContentConfig(**config_args)
         logger.debug(
             "gemini request model=%s turns=%d tools=%d", self.model, len(turns), len(tools)
         )
-        contents = _to_gemini_contents(turns)
+        return _to_gemini_contents(turns), config_args
+
+    def complete(
+        self,
+        *,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[dict[str, Any]],
+    ) -> ProviderReply:
+        types = self._types
+        contents, config_args = self._build_request(system, turns, tools)
         try:
-            response = self._generate(contents, config)
+            response = self._generate(contents, types.GenerateContentConfig(**config_args))
         except ProviderError as exc:
             # Not every model accepts thinking settings. Retry once without them
             # rather than failing the whole request after a model swap.
@@ -248,6 +301,104 @@ class GeminiProvider(ModelProvider):
             len(reply.text or ""),
         )
         return reply
+
+    def _open_stream(self, contents: Any, config: Any) -> Any:
+        """Open a native async stream. Isolated so tests can replace the SDK."""
+        return self._client.aio.models.generate_content_stream(
+            model=self.model,
+            contents=contents,
+            config=config,
+        )
+
+    async def stream(
+        self,
+        *,
+        system: str,
+        turns: Sequence[Turn],
+        tools: Sequence[dict[str, Any]],
+    ) -> AsyncIterator[ProviderChunk]:
+        """Stream text deltas and return the replayable turn in the final chunk."""
+        types = self._types
+        contents, config_args = self._build_request(system, turns, tools)
+        attempts = self.max_retries + 1
+        attempt = 0
+        thinking_retry_available = True
+
+        while attempt < attempts:
+            attempt += 1
+            text_chunks: list[str] = []
+            calls: list[ToolCall] = []
+            raw_parts: list[Any] = []
+            finish_name: str | None = None
+            emitted = False
+
+            try:
+                iterator = self._open_stream(contents, types.GenerateContentConfig(**config_args))
+                async for chunk in iterator:
+                    delta, chunk_calls, chunk_parts, finish = _extract_stream_chunk(chunk)
+                    if finish:
+                        finish_name = finish
+                    raw_parts.extend(chunk_parts)
+                    calls.extend(chunk_calls)
+                    if delta:
+                        text_chunks.append(delta)
+                        emitted = True
+                        yield ProviderChunk(text=delta)
+                    elif chunk_calls or chunk_parts:
+                        emitted = True
+            except ProviderError:
+                raise
+            except Exception as exc:  # SDK raises several unrelated error types
+                message = str(exc).lower()
+                if (
+                    not emitted
+                    and "thinking_config" in config_args
+                    and "invalid argument" in message
+                    and thinking_retry_available
+                ):
+                    logger.warning("model rejected thinking settings; retrying without them")
+                    config_args.pop("thinking_config", None)
+                    thinking_retry_available = False
+                    attempt -= 1
+                    continue
+                if not emitted and attempt < attempts and _is_retryable(exc):
+                    delay = min(2 ** (attempt - 1), 4)
+                    logger.warning(
+                        "transient stream failure (attempt %d/%d), retrying in %ss",
+                        attempt,
+                        attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                friendly = _friendly_error(exc, self._api_key)
+                logger.warning("gemini stream failed: %s", friendly)
+                raise ProviderError(friendly) from exc
+
+            text = "".join(text_chunks).strip() or None
+            if not text and not calls:
+                blocked = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT"}
+                if finish_name in blocked:
+                    raise ProviderError(
+                        f"The provider blocked the response (reason: {finish_name})."
+                    )
+                raise ProviderError(
+                    f"The provider returned an empty response (finish: {finish_name})."
+                )
+            logger.debug(
+                "gemini stream finish=%s tool_calls=%d text_chars=%d",
+                finish_name,
+                len(calls),
+                len(text or ""),
+            )
+            yield ProviderChunk(
+                tool_calls=calls,
+                raw=types.Content(role="model", parts=raw_parts) if raw_parts else None,
+                finish_reason=finish_name,
+            )
+            return
+
+        raise ProviderError("The provider stream failed without a response.")  # pragma: no cover
 
     def transcribe_audio(self, data: bytes, *, mime_type: str = "audio/wav") -> str:
         """Transcribe a recorded voice command with Gemini's audio input."""

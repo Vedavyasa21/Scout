@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scout.config import Settings
+from scout.security.audit import AuditLedger
 from scout.security.permissions import PermissionLevel
 from scout.security.policy import (
     ApprovalDecision,
     ApprovalRequest,
     Approver,
+    PermissionDecision,
     PolicyEngine,
 )
+
+if TYPE_CHECKING:
+    from scout.agent.plan import PlanTracker
 
 __all__ = [
     "PermissionDeniedError",
@@ -57,13 +63,25 @@ class ToolContext:
     settings: Settings
     workspaces: tuple[Path, ...] = field(default_factory=tuple)
     approver: Approver | None = None
+    audit: AuditLedger | None = None
+    task_id: str = ""
+    plan: PlanTracker | None = None
 
     @classmethod
-    def from_settings(cls, settings: Settings, approver: Approver | None = None) -> ToolContext:
+    def from_settings(
+        cls,
+        settings: Settings,
+        approver: Approver | None = None,
+        *,
+        audit: AuditLedger | None = None,
+        task_id: str = "",
+    ) -> ToolContext:
         return cls(
             settings=settings,
             workspaces=tuple(settings.workspaces),
             approver=approver,
+            audit=audit,
+            task_id=task_id,
         )
 
 
@@ -233,6 +251,20 @@ class ToolRegistry:
     def specs(self) -> list[dict[str, Any]]:
         return [tool.spec() for tool in self.all()]
 
+    async def execute_async(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> ToolResult:
+        """Run a tool without blocking the event loop.
+
+        Tool handlers are synchronous by contract; the registry's own timeout
+        still applies. A running handler cannot be killed, so cancellation is
+        observed between tool calls rather than inside one.
+        """
+        return await asyncio.to_thread(self.execute, name, arguments, context)
+
     def execute(
         self,
         name: str,
@@ -251,14 +283,48 @@ class ToolRegistry:
         except ToolError as exc:
             return ToolResult(ok=False, error=str(exc))
 
-        if self.policy.requires_approval(tool):
+        audit = context.audit
+        full_access = getattr(context.settings, "full_access", False)
+        decision_kind = self.policy.evaluate(tool, full_access)
+
+        if decision_kind is PermissionDecision.DENY:
+            if audit is not None:
+                audit.record(
+                    "tool_denied",
+                    task_id=context.task_id,
+                    tool=tool.name,
+                    permission=tool.permission.value,
+                    reason="policy",
+                )
+            return ToolResult(
+                ok=False,
+                error=f"Tool '{tool.name}' is blocked by the local permission policy.",
+            )
+
+        if decision_kind is PermissionDecision.ASK:
             request = ApprovalRequest(
                 tool=tool.name,
                 permission=tool.permission,
                 arguments=validated,
                 description=tool.description,
             )
+            if audit is not None:
+                audit.record(
+                    "approval_requested",
+                    task_id=context.task_id,
+                    tool=tool.name,
+                    permission=tool.permission.value,
+                    arguments=validated,
+                )
             if context.approver is None:
+                if audit is not None:
+                    audit.record(
+                        "approval_denied",
+                        task_id=context.task_id,
+                        tool=tool.name,
+                        permission=tool.permission.value,
+                        reason="no_approver",
+                    )
                 return ToolResult(
                     ok=False,
                     error=(
@@ -269,7 +335,23 @@ class ToolRegistry:
             try:
                 decision = context.approver.approve(request)
             except Exception as exc:  # a broken UI must never mean "allow"
+                if audit is not None:
+                    audit.record(
+                        "approval_denied",
+                        task_id=context.task_id,
+                        tool=tool.name,
+                        permission=tool.permission.value,
+                        reason="approval_error",
+                    )
                 return ToolResult(ok=False, error=f"Approval failed: {exc}")
+            if audit is not None:
+                audit.record(
+                    "approval_decision",
+                    task_id=context.task_id,
+                    tool=tool.name,
+                    permission=tool.permission.value,
+                    decision=str(getattr(decision, "value", decision)),
+                )
             if decision is ApprovalDecision.ALLOW_SESSION:
                 self.policy.remember(tool.name)
             elif decision is not ApprovalDecision.ALLOW_ONCE:
@@ -294,16 +376,28 @@ class ToolRegistry:
             executor.shutdown(wait=False, cancel_futures=True)
 
         result.duration_ms = int((time.perf_counter() - started) * 1000)
+        if audit is not None:
+            audit.record(
+                "tool_result",
+                task_id=context.task_id,
+                tool=tool.name,
+                permission=tool.permission.value,
+                ok=result.ok,
+                duration_ms=result.duration_ms,
+                error=result.error,
+                arguments=validated,
+            )
         return result
 
 
 def build_registry() -> ToolRegistry:
     """Build the default registry with every built-in tool."""
-    from scout.tools import applications, desktop, filesystem, system
+    from scout.tools import applications, desktop, filesystem, planning, system
 
     registry = ToolRegistry()
     system.register(registry)
     filesystem.register(registry)
     applications.register(registry)
     desktop.register(registry)
+    planning.register(registry)
     return registry

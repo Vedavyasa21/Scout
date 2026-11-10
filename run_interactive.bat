@@ -1,6 +1,6 @@
 @echo off
-cd /d "C:\MyPersonalprojects\Scout"
+cd /d "%~dp0"
 title Scout AI Agent
-call .venv\Scripts\activate.bat
+call "%~dp0.venv\Scripts\activate.bat"
 python -m scout interactive
 pause

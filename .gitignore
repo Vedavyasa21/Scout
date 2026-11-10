@@ -18,6 +18,7 @@ htmlcov/
 
 # Scout runtime data
 .scout/
+.ralph/
 logs/
 *.db
 *.sqlite3

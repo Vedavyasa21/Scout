@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
+from google.genai import types as genai_types
 
 from scout.providers import AssistantTurn, ProviderError, ToolCall, ToolTurn, UserTurn
 from scout.providers.gemini import (
@@ -162,3 +164,91 @@ def test_non_transient_failure_is_not_retried(monkeypatch) -> None:
     with pytest.raises(ProviderError):
         provider.complete(system="s", turns=[UserTurn("hi")], tools=[])
     assert calls["count"] == 1
+
+
+# ----------------------------------------------------------------------
+# Streaming
+# ----------------------------------------------------------------------
+
+
+def _stream_chunk(parts: list, finish: str = "STOP"):
+    candidate = SimpleNamespace(
+        finish_reason=SimpleNamespace(name=finish),
+        content=SimpleNamespace(parts=parts),
+    )
+    return SimpleNamespace(candidates=[candidate])
+
+
+class FakeStream:
+    def __init__(self, chunks: list) -> None:
+        self._chunks = list(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+
+def _collect(provider: GeminiProvider) -> list:
+    async def run():
+        return [
+            chunk async for chunk in provider.stream(system="s", turns=[UserTurn("hi")], tools=[])
+        ]
+
+    return asyncio.run(run())
+
+
+def test_stream_emits_text_deltas_and_a_final_raw_turn(monkeypatch) -> None:
+    provider = GeminiProvider(model="m", api_key="k")
+    part_a = genai_types.Part(text="Hel")
+    part_b = genai_types.Part(text="lo")
+    monkeypatch.setattr(
+        provider,
+        "_open_stream",
+        lambda _contents, _config: FakeStream([_stream_chunk([part_a]), _stream_chunk([part_b])]),
+    )
+
+    chunks = _collect(provider)
+
+    assert [chunk.text for chunk in chunks] == ["Hel", "lo", ""]
+    assert chunks[-1].raw is not None
+    assert chunks[-1].finish_reason == "STOP"
+
+
+def test_stream_surfaces_tool_calls(monkeypatch) -> None:
+    provider = GeminiProvider(model="m", api_key="k")
+    call = genai_types.Part(
+        function_call=genai_types.FunctionCall(name="get_os_info", args={}, id="c1")
+    )
+    monkeypatch.setattr(
+        provider,
+        "_open_stream",
+        lambda _contents, _config: FakeStream([_stream_chunk([call])]),
+    )
+
+    chunks = _collect(provider)
+
+    assert chunks[-1].tool_calls == [ToolCall(name="get_os_info", arguments={}, call_id="c1")]
+    assert chunks[-1].text == ""
+
+
+def test_stream_rejects_an_empty_response(monkeypatch) -> None:
+    provider = GeminiProvider(model="m", api_key="k")
+    monkeypatch.setattr(
+        provider,
+        "_open_stream",
+        lambda _contents, _config: FakeStream([_stream_chunk([])]),
+    )
+
+    with pytest.raises(ProviderError, match="empty response"):
+        _collect(provider)
+
+
+def test_capabilities_report_streaming_and_audio() -> None:
+    provider = GeminiProvider(model="m", api_key="k")
+    assert provider.capabilities.streaming is True
+    assert provider.capabilities.tool_calling is True
+    assert provider.capabilities.audio_input is True
